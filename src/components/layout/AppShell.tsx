@@ -26,8 +26,36 @@ export default function AppShell({
   const { versionInfo, hasUpdate, dismiss } = useVersionCheck();
   const { user, logout } = useAuth();
 
+  // Estado para permitir que o administrador habilite o menu flutuante em páginas onde ele estaria oculto
+  const [adminShowNav, setAdminShowNav] = React.useState<boolean>(false);
+  const isMounted = React.useRef(false);
+
+  // Inicializa a preferência do localStorage após a montagem do componente (evita erros de hidratação)
+  React.useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const saved = window.localStorage.getItem('ministerio:admin:show_nav');
+      if (saved === 'true') {
+        setAdminShowNav(true);
+      }
+    }
+  }, []);
+
+  // Sincroniza o estado com o localStorage sempre que mudar
+  React.useEffect(() => {
+    if (isMounted.current) {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem('ministerio:admin:show_nav', String(adminShowNav));
+      }
+    } else {
+      isMounted.current = true;
+    }
+  }, [adminShowNav]);
+
   // Ativa a sincronização de notificações multidispositivo em tempo real
   useNotificationScheduler();
+
+  // O menu flutuante será exibido se showNav for true ou se o usuário for administrador e ativou a exibição
+  const finalShowNav = showNav || (user?.isAdmin && adminShowNav);
 
   return (
     <>
@@ -55,6 +83,19 @@ export default function AppShell({
                   <span className="app-shell__username">
                     {user.username}
                   </span>
+                  {user.isAdmin && (
+                    <button
+                      className={`app-shell__nav-toggle ${adminShowNav ? 'app-shell__nav-toggle--active' : ''}`}
+                      onClick={() => setAdminShowNav(prev => !prev)}
+                      aria-label="Alternar menu flutuante"
+                      title={adminShowNav ? "Ocultar menu flutuante" : "Mostrar menu flutuante"}
+                    >
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <circle cx="12" cy="12" r="10" />
+                        <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76" />
+                      </svg>
+                    </button>
+                  )}
                   <button
                     className="app-shell__logout"
                     onClick={logout}
@@ -80,7 +121,7 @@ export default function AppShell({
         </main>
 
         {/* Floating Navigation */}
-        {showNav && <FloatingNav />}
+        {finalShowNav && <FloatingNav />}
       </div>
 
       <style jsx>{`
@@ -140,6 +181,34 @@ export default function AppShell({
           font-size: var(--font-size-sm);
           color: var(--color-text-secondary);
           font-weight: var(--font-weight-medium);
+        }
+
+        .app-shell__nav-toggle {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 40px;
+          height: 40px;
+          border-radius: var(--radius-sm);
+          background: transparent;
+          color: var(--color-text-muted);
+          border: none;
+          cursor: pointer;
+          transition: all var(--transition-fast);
+        }
+
+        .app-shell__nav-toggle:hover {
+          background: var(--color-surface);
+          color: var(--color-primary-light);
+        }
+
+        .app-shell__nav-toggle--active {
+          color: var(--color-primary-light);
+          background: rgba(59, 130, 246, 0.15);
+        }
+
+        .app-shell__nav-toggle--active:hover {
+          background: rgba(59, 130, 246, 0.22);
         }
 
         .app-shell__logout {
