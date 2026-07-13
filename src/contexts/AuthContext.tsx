@@ -3,7 +3,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 import { signInAnonymously, onAuthStateChanged, signOut, type User as FirebaseUser } from 'firebase/auth';
 import { getFirebaseAuth, isMockMode } from '@/lib/firebase';
-import { findUserByUsername, createUser, subscribeToUser } from '@/lib/firestore';
+import { findUserByUsername, createUser, subscribeToUser, migrateUserUID } from '@/lib/firestore';
 import { setSession, removeSession } from '@/lib/rtdb';
 import { getItem, setItem, removeItem, clearAll } from '@/lib/localStorage';
 import { STORAGE_KEYS } from '@/constants';
@@ -44,6 +44,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   });
 
   const unsubUserRef = useRef<(() => void) | null>(null);
+  const userRef = useRef<UserProfile | null>(null);
+
+  // Mantém a ref atualizada com o valor do usuário no estado (evita closure obsoleta no useEffect)
+  useEffect(() => {
+    userRef.current = state.user;
+  }, [state.user]);
 
   // Listen to Firebase Auth state
   useEffect(() => {
@@ -70,7 +76,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     const unsubAuth = onAuthStateChanged(getFirebaseAuth(), async (firebaseUser: FirebaseUser | null) => {
-      if (firebaseUser && state.user) {
+      const currentUser = userRef.current;
+      if (firebaseUser && currentUser) {
+        if (firebaseUser.uid !== currentUser.uid) {
+          console.warn('[Auth] UID mismatch on auth change. Firebase:', firebaseUser.uid, 'Cached:', currentUser.uid);
+          removeItem(STORAGE_KEYS.USER);
+          removeItem(STORAGE_KEYS.SESSION);
+          setState({
+            user: null,
+            loading: false,
+            error: null,
+            isAuthenticated: false,
+          });
+          return;
+        }
+
         // Already have local user data, subscribe to updates
         unsubUserRef.current?.();
         unsubUserRef.current = subscribeToUser(firebaseUser.uid, (updatedUser) => {
@@ -81,6 +101,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               isAuthenticated: true,
               loading: false,
             }));
+          } else {
+            console.warn('[Auth] User document not found in Firestore. Logging out.');
+            removeItem(STORAGE_KEYS.USER);
+            removeItem(STORAGE_KEYS.SESSION);
+            setState({
+              user: null,
+              loading: false,
+              error: null,
+              isAuthenticated: false,
+            });
           }
         });
       } else if (!firebaseUser) {
@@ -183,7 +213,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       let userProfile: UserProfile;
 
       if (existingUser) {
-        userProfile = existingUser;
+        if (existingUser.uid !== uid) {
+          console.log(`[Auth] Migrating user ${normalizedUsername} from old UID ${existingUser.uid} to new UID ${uid}`);
+          userProfile = await migrateUserUID(existingUser.uid, uid, normalizedUsername, phone);
+        } else {
+          userProfile = existingUser;
+        }
       } else {
         // Create new user
         userProfile = await createUser(uid, normalizedUsername, phone);

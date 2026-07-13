@@ -6,6 +6,7 @@ import {
   getDoc,
   setDoc,
   updateDoc,
+  deleteDoc,
   onSnapshot,
   query,
   where,
@@ -13,9 +14,10 @@ import {
   getDocs,
   type Unsubscribe,
 } from 'firebase/firestore';
+import { getISOWeekDetails } from './date';
 import { getFirebaseDb, isMockMode } from './firebase';
 import { FIREBASE_PATHS, STORAGE_KEYS, APP_VERSION } from '@/constants';
-import { getItem, setItem } from './localStorage';
+import { getItem, setItem, removeItem } from './localStorage';
 import type { UserProfile, MinistrationDocument } from '@/types';
 
 /**
@@ -240,4 +242,100 @@ export function subscribeToUserMinistration(
     console.error(`[Firestore] subscribeToUserMinistration error for user ${uid}:`, error);
     callback(null);
   });
+}
+
+/**
+ * Migrates a user profile and all their ministration subcollection documents from an old UID to a new UID.
+ * This is used to maintain data persistence when an anonymous user logs in from a new device/session.
+ */
+export async function migrateUserUID(
+  oldUid: string,
+  newUid: string,
+  username: string,
+  phone: string
+): Promise<UserProfile> {
+  if (isMockMode()) {
+    const users = getItem<Record<string, UserProfile>>('mock_firestore_users') || {};
+    const oldUser = users[oldUid];
+    const now = Date.now();
+    const migratedUser: UserProfile = {
+      uid: newUid,
+      username: username.toLowerCase().trim(),
+      phone,
+      createdAt: oldUser?.createdAt ?? now,
+      updatedAt: now,
+      isAdmin: oldUser?.isAdmin ?? (username.toLowerCase().trim() === 'admin'),
+    };
+    
+    // Copy profile
+    users[newUid] = migratedUser;
+    delete users[oldUid];
+    setItem('mock_firestore_users', users);
+    
+    // Migrate ministration cache key
+    const { weekId } = getISOWeekDetails();
+    const oldCacheKey = `ministerio:ministration:${oldUid}:${weekId}`;
+    const newCacheKey = `ministerio:ministration:${newUid}:${weekId}`;
+    const minDoc = getItem<MinistrationDocument>(oldCacheKey);
+    if (minDoc) {
+      setItem(newCacheKey, minDoc);
+      removeItem(oldCacheKey);
+    }
+    
+    return migratedUser;
+  }
+
+  const db = getFirebaseDb();
+  const now = Date.now();
+
+  // 1. Get old user document to preserve creation date and admin role status
+  const oldDocRef = doc(db, FIREBASE_PATHS.USERS, oldUid);
+  const oldSnap = await getDoc(oldDocRef);
+  let createdAt = now;
+  let isAdmin = username.toLowerCase().trim() === 'admin';
+
+  if (oldSnap.exists()) {
+    const oldData = oldSnap.data() as UserProfile;
+    createdAt = oldData.createdAt ?? now;
+    isAdmin = oldData.isAdmin ?? isAdmin;
+  }
+
+  const newUserProfile: UserProfile = {
+    uid: newUid,
+    username: username.toLowerCase().trim(),
+    phone,
+    createdAt,
+    updatedAt: now,
+    isAdmin,
+  };
+
+  // 2. Create the new user profile document
+  const newDocRef = doc(db, FIREBASE_PATHS.USERS, newUid);
+  await setDoc(newDocRef, newUserProfile);
+
+  // 3. Migrate all documents in the ministration subcollection
+  try {
+    const oldMinCollectionRef = collection(db, FIREBASE_PATHS.USERS, oldUid, 'ministration');
+    const minDocsSnap = await getDocs(oldMinCollectionRef);
+
+    for (const docSnap of minDocsSnap.docs) {
+      const data = docSnap.data();
+      const newMinDocRef = doc(db, FIREBASE_PATHS.USERS, newUid, 'ministration', docSnap.id);
+      await setDoc(newMinDocRef, data);
+      
+      // Delete old min doc
+      await deleteDoc(docSnap.ref);
+    }
+  } catch (err) {
+    console.error(`[Firestore] Failed to migrate ministration subcollection for ${username}:`, err);
+  }
+
+  // 4. Delete the old user profile document
+  try {
+    await deleteDoc(oldDocRef);
+  } catch (err) {
+    console.error(`[Firestore] Failed to delete old user profile document for ${username}:`, err);
+  }
+
+  return newUserProfile;
 }
